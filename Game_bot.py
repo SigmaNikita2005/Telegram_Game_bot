@@ -90,6 +90,21 @@ class RobState(StatesGroup):
     currency = State()
     amount = State()
 
+# НОВЫЕ СОСТОЯНИЯ: ДОНАТ И ПРЕДЛОЖКА
+class DonatState(StatesGroup):
+    amount = State()
+
+class PredlojkaState(StatesGroup):
+    idea = State()
+
+class PredlojkaReplyState(StatesGroup):
+    text = State()
+    target_id = State()
+
+class PredlojkaUserReplyState(StatesGroup):
+    text = State()
+    target_id = State()
+
 # --- БАЗА ДАННЫХ (JSON) ---
 def load_db():
     if not os.path.exists(DB_FILE):
@@ -540,7 +555,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
         "🔹 `/vip` — Купить VIP\n"
         "🔹 Игры: `/cubici`, `/casino`, `/darts`, `/football`, `/basketball`, `/mines`, `/rocket`, `/roulette`\n"
         "🔹 Чат: `/rules`, `/mut`, `/unmute`, `/ban`, `/unban`, `/rob`\n"
-        "🔹 Прочее: `/upgrade`\n\n"
+        "🔹 Прочее: `/upgrade`, `/donat`, `/predlojka`\n\n"
         "👑 Админ: `/adminpanel`\n\n"
         f"🔗 Реф. ссылка:\n`{ref_link}`", parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove()
     )
@@ -911,15 +926,32 @@ async def cmd_vip(message: types.Message):
 async def on_pre_checkout(pre_checkout_query: types.PreCheckoutQuery):
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
+# ИЗМЕНЕННЫЙ ОБРАБОТЧИК ОПЛАТЫ (теперь ловит и вип, и донат)
 @dp.message(F.successful_payment)
 async def on_successful_payment(message: types.Message):
+    payload = message.successful_payment.invoice_payload
     db = load_db()
     uid = str(message.from_user.id)
     init_user(db, message.from_user.id, message.from_user.username)
     
-    db["users"][uid]["vip_until"] = (datetime.now() + timedelta(days=30)).isoformat()
-    save_db(db)
-    await message.reply("🎉 Поздравляем! Вы успешно приобрели VIP на 1 месяц! 💎")
+    if payload == "vip_1_month":
+        db["users"][uid]["vip_until"] = (datetime.now() + timedelta(days=30)).isoformat()
+        save_db(db)
+        await message.reply("🎉 Поздравляем! Вы успешно приобрели VIP на 1 месяц! 💎")
+    
+    elif payload == "donat_stars":
+        stars_amount = message.successful_payment.total_amount
+        save_db(db)
+        await message.reply("🌟 Спасибо за поддержку бота! Твой донат делает нас лучше!")
+        try:
+            await bot.send_message(
+                OWNER_ID, 
+                f"💸 **Новый донат!**\n👤 Игрок: @{message.from_user.username or 'без юзернейма'} (ID: `{message.from_user.id}`)\n🌟 Поддержал бота на **{stars_amount} XTR** (звёзд)!",
+                parse_mode="Markdown"
+            )
+        except:
+            pass
+
 
 @dp.message(Command("datbvip"))
 async def cmd_datbvip(message: types.Message, state: FSMContext):
@@ -1605,6 +1637,151 @@ async def play_rocket(message_or_cb, user_id, curr, amount, state, is_callback=F
 @dp.callback_query(F.data == "ignore_cb")
 async def cb_ignore_general(callback: types.CallbackQuery):
     await callback.answer()
+
+
+# =====================================================================
+# --- НОВЫЕ СИСТЕМЫ: ДОНАТ И ПРЕДЛОЖКА ---
+# =====================================================================
+
+@dp.message(Command("donat", ignore_case=True))
+async def cmd_donat(message: types.Message, state: FSMContext):
+    await state.set_state(DonatState.amount)
+    await message.reply("🌟 **Сколько хотите дать звёзд!?!?**\n(Пример: 1, 10, 50)", reply_markup=cancel_kb)
+
+@dp.message(DonatState.amount)
+async def process_donat_amount(message: types.Message, state: FSMContext):
+    if message.text == "В главное меню 🔙": return
+    if not message.text.isdigit():
+        return await message.reply("❌ Пожалуйста, введите число (например, 1).", reply_markup=cancel_kb)
+    
+    amount = int(message.text)
+    if amount < 1:
+        return await message.reply("❌ Минимум 1 звезда.", reply_markup=cancel_kb)
+    
+    prices = [types.LabeledPrice(label="Донат боту", amount=amount)]
+    
+    try:
+        await bot.send_invoice(
+            chat_id=message.chat.id,
+            title="Поддержка бота 🌟",
+            description=f"Донат в размере {amount} звёзд.",
+            payload="donat_stars",
+            provider_token="",  # Пустой токен для XTR (звёзд)
+            currency="XTR",
+            prices=prices
+        )
+        await state.clear()
+        await message.reply("👇 Внизу появилась кнопка для оплаты!", reply_markup=types.ReplyKeyboardRemove())
+    except Exception as e:
+        await message.reply(f"❌ Ошибка: {e}")
+        await state.clear()
+
+@dp.message(Command("predlojka", ignore_case=True))
+async def cmd_predlojka(message: types.Message, state: FSMContext):
+    await state.set_state(PredlojkaState.idea)
+    await message.reply("💡 Напишите идею свою какую вы хотите:", reply_markup=cancel_kb)
+
+@dp.message(PredlojkaState.idea)
+async def process_predlojka_idea(message: types.Message, state: FSMContext):
+    if message.text == "В главное меню 🔙": return
+    idea_text = message.text
+    user_id = message.from_user.id
+    username = message.from_user.username or "Отсутствует"
+    
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [
+            types.InlineKeyboardButton(text="Ответить 💬", callback_data=f"pred_reply_{user_id}"),
+            types.InlineKeyboardButton(text="Проигнорировать ❌", callback_data=f"pred_ignore_{user_id}")
+        ]
+    ])
+    
+    try:
+        await bot.send_message(
+            OWNER_ID,
+            f"💡 **Новая идея/предложение!**\n👤 От: @{username} (ID: `{user_id}`)\n\n📝 Идея:\n{idea_text}",
+            reply_markup=kb,
+            parse_mode="Markdown"
+        )
+        await message.reply("✅ Ваша идея успешно отправлена создателю бота!", reply_markup=types.ReplyKeyboardRemove())
+    except Exception:
+        await message.reply("❌ Ошибка отправки. Возможно, создатель заблокировал бота.", reply_markup=types.ReplyKeyboardRemove())
+        
+    await state.clear()
+
+@dp.callback_query(F.data.startswith("pred_ignore_"))
+async def cb_pred_ignore(callback: types.CallbackQuery):
+    user_id = int(callback.data.split("_")[2])
+    try:
+        await bot.send_message(user_id, "Ваш ответ проигнорировали")
+        await callback.message.edit_text(callback.message.text + "\n\n❌ **Проигнорировано**")
+    except:
+        pass
+    await callback.answer("Успешно проигнорировано")
+
+@dp.callback_query(F.data.startswith("pred_reply_"))
+async def cb_pred_reply(callback: types.CallbackQuery, state: FSMContext):
+    user_id = int(callback.data.split("_")[2])
+    await state.update_data(target_id=user_id)
+    await state.set_state(PredlojkaReplyState.text)
+    await callback.message.answer("✍️ Напишите ответ пользователю:", reply_markup=cancel_kb)
+    await callback.answer()
+
+@dp.message(PredlojkaReplyState.text)
+async def process_predlojka_reply(message: types.Message, state: FSMContext):
+    if message.text == "В главное меню 🔙": return
+    data = await state.get_data()
+    target_id = data.get("target_id")
+    
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="Ответить 💬", callback_data=f"user_pred_reply_{message.from_user.id}")]
+    ])
+    
+    try:
+        await bot.send_message(
+            target_id,
+            f"👨‍💻 **Вам пришел ответ от Создателя бота:**\n\n{message.text}",
+            reply_markup=kb,
+            parse_mode="Markdown"
+        )
+        await message.reply("✅ Ответ успешно отправлен пользователю!", reply_markup=types.ReplyKeyboardRemove())
+    except Exception:
+        await message.reply("❌ Ошибка! Пользователь заблокировал бота.", reply_markup=types.ReplyKeyboardRemove())
+    await state.clear()
+
+@dp.callback_query(F.data.startswith("user_pred_reply_"))
+async def cb_user_pred_reply(callback: types.CallbackQuery, state: FSMContext):
+    owner_id = int(callback.data.split("_")[3])
+    await state.update_data(target_id=owner_id)
+    await state.set_state(PredlojkaUserReplyState.text)
+    await callback.message.answer("✍️ Напишите ваш ответ создателю:", reply_markup=cancel_kb)
+    await callback.answer()
+
+@dp.message(PredlojkaUserReplyState.text)
+async def process_predlojka_user_reply(message: types.Message, state: FSMContext):
+    if message.text == "В главное меню 🔙": return
+    data = await state.get_data()
+    target_id = data.get("target_id")
+    user_id = message.from_user.id
+    username = message.from_user.username or "Отсутствует"
+    
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [
+            types.InlineKeyboardButton(text="Ответить 💬", callback_data=f"pred_reply_{user_id}"),
+            types.InlineKeyboardButton(text="Проигнорировать ❌", callback_data=f"pred_ignore_{user_id}")
+        ]
+    ])
+    
+    try:
+        await bot.send_message(
+            target_id,
+            f"📨 **Ответ от пользователя!**\n👤 От: @{username} (ID: `{user_id}`)\n\n📝 Текст:\n{message.text}",
+            reply_markup=kb,
+            parse_mode="Markdown"
+        )
+        await message.reply("✅ Ваш ответ успешно отправлен создателю!", reply_markup=types.ReplyKeyboardRemove())
+    except Exception:
+        await message.reply("❌ Ошибка отправки.", reply_markup=types.ReplyKeyboardRemove())
+    await state.clear()
 
 
 @dp.message(Command("zagadat"))
